@@ -4,7 +4,7 @@ An interactive page exploring how health facilities (pharmacies, clinics, hospit
 are distributed across Lebanon's governorates and towns, using the Health Resources Lebanon 2023
 dataset (Impact Open Data, via linked.aub.edu.lb).
 
-**Live app:** PASTE-YOUR-APP-LINK-HERE
+**Live app:** https://health-resources-lebanon-3f4jdnxjvgbiuxw3bj4s5e.streamlit.app/
 
 ## Features
 - Context and two key insights computed from the data
