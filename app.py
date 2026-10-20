@@ -22,11 +22,15 @@ RENAME = {
 FACILITY_COLS = ["Pharmacies", "Clinics", "First aid centers", "Care centers",
                  "Labs & radiology", "Medical centers", "Hospitals"]
 
-COLORS = {
-    "Pharmacies": "#2E86AB", "Clinics": "#A23B72", "First aid centers": "#F18F01",
-    "Care centers": "#C73E1D", "Labs & radiology": "#3B1F2B",
-    "Medical centers": "#6A994E", "Hospitals": "#E63946",
+# The 7 facility types are grouped into 3 levels of care to reduce clutter.
+# Advanced care gets the only strong color because it carries the main story.
+TIERS = {
+    "Basic care": ["Pharmacies", "Clinics", "First aid centers"],
+    "Community centers": ["Care centers", "Medical centers"],
+    "Advanced care": ["Hospitals", "Labs & radiology"],
 }
+TIER_COLORS = {"Basic care": "#BFD7EA", "Community centers": "#5B8DB8", "Advanced care": "#D1495B"}
+TIER_ORDER = list(TIERS.keys())
 
 # refArea mixes governorates and districts, so every value is mapped to a governorate
 AREA_TO_GOV = {
@@ -61,12 +65,14 @@ def load_data(path="health_resources.csv"):
     df["Governorate"] = df["refArea"].apply(to_governorate)
     df["Total facilities"] = df[FACILITY_COLS].sum(axis=1)
     df["Label"] = df["Town"] + " (" + df["Governorate"] + ")"
-    return df[["Town", "Governorate", "Label"] + FACILITY_COLS + ["Total facilities"]]
+    for tier, cols in TIERS.items():
+        df[tier] = df[cols].sum(axis=1)
+    return df[["Town", "Governorate", "Label"] + FACILITY_COLS + TIER_ORDER + ["Total facilities"]]
 
 
 df = load_data()
-gov_totals = df.groupby("Governorate")[FACILITY_COLS].sum()
-gov_totals["Total"] = gov_totals.sum(axis=1)
+gov_totals = df.groupby("Governorate")[FACILITY_COLS + TIER_ORDER].sum()
+gov_totals["Total"] = gov_totals[FACILITY_COLS].sum(axis=1)
 gov_totals = gov_totals.sort_values("Total", ascending=False)
 national_total = int(gov_totals["Total"].sum())
 
@@ -143,58 +149,98 @@ else:
 
 scope_sorted = scope.sort_values("Total facilities", ascending=False)
 town_options = scope_sorted[label_col].tolist()
-default_towns = town_options[:5]
 
 with w2:
     towns = st.multiselect(
-        f"Step 2 – Compare towns in {governorate} (sorted by number of facilities)",
+        f"Step 2 – Compare towns in {governorate} (sorted by number of facilities, up to 10)",
         town_options,
-        default=default_towns,
+        default=town_options[:5],
+        max_selections=10,
         key=f"towns_{governorate}",  # resets the selection when the governorate changes
         help="Starts with the 5 best-equipped towns. Add a small town to see the contrast.",
     )
 
 # KPIs for the selected scope
+scope_total = int(scope["Total facilities"].sum())
 k1, k2, k3, k4 = st.columns(4)
-k1.metric(f"Facilities in {governorate}", f"{int(scope['Total facilities'].sum()):,}")
-k2.metric("Share of national total", f"{scope['Total facilities'].sum() / national_total:.0%}")
-k3.metric("Hospitals", f"{int(scope['Hospitals'].sum()):,}")
+k1.metric(f"Facilities in {governorate}", f"{scope_total:,}")
+k2.metric("Share of national total", f"{scope_total / national_total:.0%}")
+k3.metric("Hospitals & labs (advanced care)", f"{int(scope['Advanced care'].sum()):,}")
 k4.metric("Towns with no facility", f"{(scope['Total facilities'] == 0).mean():.0%}")
+
+# One shared legend for both charts (same colors mean the same thing everywhere)
+legend = " &nbsp;&nbsp; ".join(
+    f"<span style='display:inline-block;width:12px;height:12px;background:{TIER_COLORS[t]};"
+    f"border-radius:2px;margin-right:6px;vertical-align:middle'></span>"
+    f"<b>{t}</b> <span style='color:#6b7280'>({', '.join(TIERS[t]).lower()})</span>"
+    for t in TIER_ORDER
+)
+st.markdown(legend, unsafe_allow_html=True)
+
+
+def stacked_hbar(data, name_col, order_top_to_bottom, title, highlight=None, height=420):
+    """Horizontal stacked bar by level of care, biggest on top, total labeled at the end."""
+    long = data.melt(id_vars=[name_col], value_vars=TIER_ORDER,
+                     var_name="Level of care", value_name="Facilities")
+    fig = px.bar(
+        long, x="Facilities", y=name_col, color="Level of care", orientation="h",
+        category_orders={name_col: order_top_to_bottom, "Level of care": TIER_ORDER},
+        color_discrete_map=TIER_COLORS, title=title,
+    )
+    fig.update_traces(hovertemplate="%{y}<br>%{fullData.name}: %{x}<extra></extra>")
+    if highlight is not None:
+        for trace in fig.data:
+            trace.marker.opacity = [1.0 if n == highlight else 0.25 for n in trace.y]
+    totals = data.set_index(name_col)[TIER_ORDER].sum(axis=1)
+    for name, total in totals.items():
+        faded = highlight is not None and name != highlight
+        fig.add_annotation(x=total, y=name, text=f"{int(total):,}", showarrow=False,
+                           xanchor="left", xshift=6,
+                           font=dict(size=13, color="#9ca3af" if faded else "#111827"))
+    fig.update_layout(
+        showlegend=False, height=height, bargap=0.3,
+        xaxis=dict(title="Number of facilities", showgrid=True, gridcolor="#eef0f3"),
+        yaxis=dict(title=""), plot_bgcolor="white",
+        margin=dict(l=10, r=40, t=70, b=40), title_font_size=17,
+    )
+    return fig
+
 
 left, right = st.columns(2)
 
-# Chart 1: governorates, with the selected one highlighted
+# Chart 1: all governorates, the selected one highlighted
 with left:
-    long = gov_totals[FACILITY_COLS].reset_index().melt(
-        id_vars="Governorate", var_name="Facility type", value_name="Count")
-    fig1 = px.bar(
-        long, x="Governorate", y="Count", color="Facility type",
-        category_orders={"Governorate": gov_totals.index.tolist(), "Facility type": FACILITY_COLS},
-        color_discrete_map=COLORS,
-        title="Health facilities by governorate and type",
-    )
-    if governorate != "All of Lebanon":
-        for trace in fig1.data:
-            trace.marker.opacity = [1.0 if g == governorate else 0.25 for g in trace.x]
-    fig1.update_layout(legend_title_text="", xaxis_title="", yaxis_title="Number of facilities")
+    gov_df = gov_totals[TIER_ORDER].reset_index()
+    order = gov_totals.index.tolist()  # already sorted largest first
+    if governorate == "All of Lebanon":
+        title1 = f"{top_gov} has {top_share:.0%} of Lebanon's health facilities"
+    else:
+        rank = order.index(governorate) + 1
+        share = gov_totals.loc[governorate, "Total"] / national_total
+        title1 = f"{governorate} ranks #{rank} of 7, with {share:.0%} of all facilities"
+    fig1 = stacked_hbar(gov_df, "Governorate", order, title1,
+                        highlight=None if governorate == "All of Lebanon" else governorate)
     st.plotly_chart(fig1, width="stretch")
 
-# Chart 2: selected towns, broken down by facility type
+# Chart 2: the selected towns
 with right:
     if not towns:
         st.warning("Pick at least one town in Step 2 to see the comparison.")
     else:
-        chosen = scope[scope[label_col].isin(towns)].sort_values("Total facilities")
-        town_long = chosen.melt(id_vars=[label_col], value_vars=FACILITY_COLS,
-                                var_name="Facility type", value_name="Count")
-        fig2 = px.bar(
-            town_long, x="Count", y=label_col, color="Facility type", orientation="h",
-            category_orders={label_col: chosen[label_col].tolist(), "Facility type": FACILITY_COLS},
-            color_discrete_map=COLORS,
-            title=f"What the selected towns have ({governorate})",
-        )
-        fig2.update_layout(legend_title_text="", yaxis_title="", xaxis_title="Number of facilities")
+        chosen = scope[scope[label_col].isin(towns)].sort_values("Total facilities", ascending=False)
+        top_town, low_town = chosen.iloc[0], chosen.iloc[-1]
+        if len(chosen) >= 2 and low_town["Total facilities"] > 0:
+            ratio = top_town["Total facilities"] / low_town["Total facilities"]
+            title2 = f"{top_town['Town']} has {ratio:.0f}× the facilities of {low_town['Town']}"
+        elif len(chosen) >= 2:
+            title2 = f"{top_town['Town']} has {int(top_town['Total facilities'])} facilities; {low_town['Town']} has none"
+        else:
+            title2 = f"{top_town['Town']}: {int(top_town['Total facilities'])} facilities"
+        fig2 = stacked_hbar(chosen, label_col, chosen[label_col].tolist(), title2,
+                            height=max(420, 55 * len(chosen) + 140))
         st.plotly_chart(fig2, width="stretch")
+
+st.caption("Hover over any bar to see exact numbers. Faded bars keep the national picture visible for comparison.")
 
 # ---------------------------------------------------------------
 # 4. Design justifications
@@ -206,13 +252,14 @@ with st.expander("Why a governorate dropdown (Step 1)?"):
 **User question:** "How does my region compare to the rest of Lebanon, and how big is the gap?"
 
 **Why this widget:** A dropdown fits because the user picks exactly one region from a short,
-fixed list of seven. I considered a multiselect, but comparing several regions at once is
-already done by the full bar chart, so picking one region keeps the focus clear. Radio buttons
-would also work but take up more space on the page.
+fixed list of seven. I considered a multiselect, but comparing all regions is already done by
+the full bar chart, so picking one keeps the focus clear. Radio buttons would also work but take
+more space on the page.
 
-**Course concept – focusing attention:** When a region is chosen, the other bars fade instead
-of disappearing. The selected region stands out through a preattentive attribute (contrast),
-while the faded bars keep the national context so the user still sees where the region ranks.
+**Course concept – focusing attention while keeping context:** When a region is chosen, the other
+bars fade instead of disappearing. The selected region stands out through contrast (a preattentive
+attribute), while the faded bars keep the national context so the user still sees where it ranks.
+The chart title also changes to state the answer directly (e.g. "Akkar ranks #7 of 7").
 """
     )
 with st.expander("Why a linked town multiselect (Step 2)?"):
@@ -220,20 +267,34 @@ with st.expander("Why a linked town multiselect (Step 2)?"):
         """
 **User question:** "Within this region, which towns have services and which are left out?"
 
-**Why this widget:** A multiselect lets the user compare a few towns side by side, which a
+**Why this widget:** A multiselect lets the user compare several towns side by side, which a
 single dropdown cannot do. I considered a "top N" slider, but it only shows the biggest towns
 and hides the small villages that make the access gap visible. The list is sorted by number of
-facilities so the best-equipped towns appear first.
+facilities, so the best-equipped towns appear first, and it is capped at 10 towns.
 
 **How it is linked:** The town list only contains towns from the governorate picked in Step 1,
-and it resets with the 5 best-equipped towns of that region. This turns the page into a
-drill-down: overview of all regions first, then zoom into one region, then details for specific
-towns.
+and it resets to the 5 best-equipped towns of that region. This turns the page into a drill-down:
+overview of all regions first, then zoom into one region, then details for specific towns.
 
-**Course concept – reducing clutter and details on demand:** Showing all 1,137 towns at once
-would be unreadable. Filtering the list to one region and starting with 5 towns keeps the chart
-clean, and the user adds detail only when they ask for it ("overview first, zoom and filter,
-then details on demand").
+**Course concept – reducing clutter and details on demand:** Showing all 1,137 towns at once would
+be unreadable. Filtering to one region, starting with 5 towns and capping at 10 keeps the chart
+clean, and the user adds detail only when they ask for it ("overview first, zoom and filter, then
+details on demand").
+"""
+    )
+with st.expander("Why the charts look the way they do"):
+    st.markdown(
+        """
+- **3 levels of care instead of 7 facility types:** seven stacked colors made the small segments
+  unreadable. Grouping them into basic care, community centers and advanced care reduces clutter
+  and matches the story of the page.
+- **Color is used on purpose:** basic and community care use muted blues, and only advanced care
+  (hospitals and labs) gets a strong red, because that is where the gap between regions matters most.
+- **Horizontal bars, sorted largest first:** region and town names stay readable without tilting,
+  and the ranking can be read top to bottom.
+- **Totals written at the end of each bar and one shared legend:** less back-and-forth between the
+  chart, the axis and the legend.
+- **Titles state the takeaway** rather than just naming the chart, and they update with the selection.
 """
     )
 
